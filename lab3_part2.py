@@ -345,8 +345,10 @@ def causal_mask(n):
 
     Hint: np.triu(..., k=1)
     """
-    # YOUR CODE HERE
-    raise NotImplementedError
+    # The upper triangle ABOVE the main diagonal is exactly the (i, j) with j > i
+    # keys that sit in query i's future. k=1 leaves the diagonal (j == i) 
+    # token is always allowed to look at itself.
+    return np.triu(np.ones((n, n), dtype=bool), k=1)
 
 # ============================================================================
 # 2. Scaled dot-product attention:   softmax(Q K^T / sqrt(d_k)) V
@@ -384,8 +386,19 @@ def attention(Q, K, V, mask=True):
         output    ->   [[1.000, 0.000],
                         [0.330, 0.670]]
     """
-    # YOUR CODE HERE
-    raise NotImplementedError
+    d_k = Q.shape[-1]
+    # 1. Match every query row against every key row. swapaxes(-1, -2) transposes only the
+    #    last two axes, so this also works when Q/K/V carry leading heads dimension
+    scores = Q @ K.swapaxes(-1, -2) / np.sqrt(d_k)
+    # 2. Block the future: setting those scores to -inf makes them exactly 0 after softmax.
+    if mask:
+        n = scores.shape[-1]
+        scores = np.where(causal_mask(n), -np.inf, scores)
+    # 3. Turn scores into weights that are positive and sum to 1 across each query's row.
+    weights = softmax(scores)
+    # 4. Each token's output is the weighted average of the value rows.
+    output = weights @ V
+    return output, weights
 
 # ============================================================================
 # 3. Multiple heads  (GPT-2: 12 heads, each gets a 64-dim slice of Q, K, V)
@@ -411,8 +424,11 @@ def split_heads(x, n_heads):
 
     Hint: reshape to (n, n_heads, d_head), then transpose(1, 0, 2).
     """
-    # YOUR CODE HERE
-    raise NotImplementedError
+    n, d = x.shape
+    d_head = d // n_heads
+    # Split each row into n_heads contiguous slices_ move the head axis to the front
+    # so out[h] is the (n, d_head) block that head h works on
+    return x.reshape(n, n_heads, d_head).transpose(1, 0, 2)
 
 
 def merge_heads(x):
@@ -430,8 +446,10 @@ def merge_heads(x):
                                                           [4, 5, 6, 7]]
         merge_heads(split_heads(x, n_heads)) should give back x exactly.
     """
-    # YOUR CODE HERE
-    raise NotImplementedError
+    n_heads, n, d_head = x.shape
+    # Inverse of split_heads: bring the token axis back to the front, then lay the heads,
+    # slices side by side into one row per token
+    return x.transpose(1, 0, 2).reshape(n, n_heads * d_head)
 
 
 def multi_head_attention(x, block, n_heads=N_HEADS):
@@ -458,8 +476,16 @@ def multi_head_attention(x, block, n_heads=N_HEADS):
     Example (GPT-2, 6 tokens):
         x.shape = (6, 768)   ->   output.shape = (6, 768),   weights.shape = (12, 6, 6)
     """
-    # YOUR CODE HERE
-    raise NotImplementedError
+    # 1. One matmul produces Q, K, V for every head, stacked side by side 
+    qkv = x @ block["W_qkv"] + block["b_qkv"]      # (n, 3d)
+    Q, K, V = np.split(qkv, 3, axis=-1)            # each (n, d)
+    # 2. Give each head its own 64-dim slice
+    Q, K, V = split_heads(Q, n_heads), split_heads(K, n_heads), split_heads(V, n_heads)
+    # 3. Run causal attention for all heads at once
+    out, weights = attention(Q, K, V, mask=True)   # out (n_heads, n, d_head)
+    # 4. Stitch the heads back together and mix them with the output projection
+    out = merge_heads(out) @ block["W_O"] + block["b_O"]
+    return out, weights
 
 # ============================================================================
 # 4. Finding heads that do specific jobs
@@ -486,8 +512,16 @@ def head_scores(cache, offset):
     Hint: for one layer's w (n_heads, n, n):  i = np.arange(offset, n);  w[:, i, i - offset]
           picks those entries for every head at once, shape (n_heads, n - offset). Average over the last axis.
     """
-    # YOUR CODE HERE
-    raise NotImplementedError
+    n_layers = len(cache)
+    n_heads = cache[0].shape[0]
+    scores = np.zeros((n_layers, n_heads))
+    for layer, w in enumerate(cache):
+        n = w.shape[-1]
+        i = np.arange(offset, n)                 
+        # w[:, i, i - offset] is for every head how much query i attended to the key `offset`
+        # tokens earlier. Averaging over i says how much consistently this head looks back that far
+        scores[layer] = w[:, i, i - offset].mean(axis=-1)
+    return scores
 
 
 # Provided helpers for section 4
